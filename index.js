@@ -4,8 +4,95 @@ import { OpenAI } from "openai";
 import { exec } from "child_process";
 import fs from "fs/promises";
 import readline from "readline";
+import path from "path";
 
-// Setup readline interface for conversational CLI
+// ─────────────────────────────────────────
+//  PRETTY TERMINAL HELPERS
+// ─────────────────────────────────────────
+
+const COLORS = {
+    reset:   "\x1b[0m",
+    bold:    "\x1b[1m",
+    dim:     "\x1b[2m",
+    red:     "\x1b[31m",
+    green:   "\x1b[32m",
+    yellow:  "\x1b[33m",
+    blue:    "\x1b[34m",
+    magenta: "\x1b[35m",
+    cyan:    "\x1b[36m",
+    white:   "\x1b[37m",
+    bgBlue:  "\x1b[44m",
+    bgGreen: "\x1b[42m",
+};
+
+const ICONS = {
+    user:    "👤",
+    think:   "💭",
+    tool:    "🔧",
+    observe: "👁️ ",
+    output:  "✅",
+    start:   "🚀",
+    error:   "❌",
+    file:    "📄",
+    folder:  "📁",
+    browser: "🌐",
+};
+
+function printSeparator() {
+    console.log(`${COLORS.dim}${"─".repeat(60)}${COLORS.reset}`);
+}
+
+function printBoxed(label, icon, color, message) {
+    console.log();
+    console.log(`  ${icon}  ${color}${COLORS.bold}${label}${COLORS.reset}`);
+    console.log(`  ${COLORS.dim}│${COLORS.reset}`);
+    // Word-wrap message to ~55 chars per line
+    const lines = wordWrap(message, 54);
+    for (const line of lines) {
+        console.log(`  ${COLORS.dim}│${COLORS.reset}  ${line}`);
+    }
+    console.log(`  ${COLORS.dim}│${COLORS.reset}`);
+    printSeparator();
+}
+
+function wordWrap(text, maxWidth) {
+    if (!text) return [""];
+    const words = text.split(" ");
+    const lines = [];
+    let current = "";
+    for (const word of words) {
+        if ((current + " " + word).trim().length > maxWidth) {
+            lines.push(current.trim());
+            current = word;
+        } else {
+            current = current ? current + " " + word : word;
+        }
+    }
+    if (current.trim()) lines.push(current.trim());
+    return lines.length ? lines : [""];
+}
+
+// Simple spinner for loading state
+function createSpinner(text) {
+    const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let i = 0;
+    const id = setInterval(() => {
+        process.stdout.write(`\r  ${COLORS.cyan}${frames[i % frames.length]}${COLORS.reset} ${COLORS.dim}${text}${COLORS.reset}`);
+        i++;
+    }, 80);
+    return {
+        stop: (finalText) => {
+            clearInterval(id);
+            process.stdout.write(`\r${" ".repeat(70)}\r`);
+            if (finalText) console.log(`  ${COLORS.green}✓${COLORS.reset} ${COLORS.dim}${finalText}${COLORS.reset}`);
+        }
+    };
+}
+
+// ─────────────────────────────────────────
+//  SETUP
+// ─────────────────────────────────────────
+
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -19,7 +106,12 @@ const client = new OpenAI({
     baseURL: isGroq ? "https://api.groq.com/openai/v1" : undefined
 });
 
-// ------------- TOOLS -------------
+// Track created files to auto-open HTML at the end
+let createdFiles = [];
+
+// ─────────────────────────────────────────
+//  TOOLS
+// ─────────────────────────────────────────
 
 async function getTheWeatherOfCity(cityname = "") {
     try {
@@ -32,7 +124,7 @@ async function getTheWeatherOfCity(cityname = "") {
 }
 
 async function executeCommand(cmd = "") {
-    return new Promise((res, rej) => {
+    return new Promise((res) => {
         exec(cmd, (error, stdout, stderr) => {
             if (error) {
                 res(`Error: ${error.message}\nStderr: ${stderr}`);
@@ -46,7 +138,13 @@ async function executeCommand(cmd = "") {
 async function createFile(argsStr = "") {
     try {
         const args = JSON.parse(argsStr);
+        // Ensure parent directories exist
+        const dir = path.dirname(args.filepath);
+        if (dir && dir !== ".") {
+            await fs.mkdir(dir, { recursive: true });
+        }
         await fs.writeFile(args.filepath, args.content, "utf-8");
+        createdFiles.push(args.filepath);
         return `File ${args.filepath} created successfully.`;
     } catch (e) {
         return `Failed to create file: ${e.message}`;
@@ -69,43 +167,65 @@ const tool_map = {
     readFile
 };
 
-// ------------- SYSTEM PROMPT -------------
-const system_prompt = `
-You are an advanced AI Assistant who works on INPUT, THINK, TOOL, OBSERVE, and OUTPUT format.
-You act as a conversational CLI agent (like Cursor or Windsurf) that can take user instructions, reason through them, and execute actions to modify the filesystem and build applications.
+// ─────────────────────────────────────────
+//  OPEN IN BROWSER
+// ─────────────────────────────────────────
 
-You are responsible for breaking down the major problem into smaller problems.
-You will do multiple thinking steps before providing any final output.
-You have access to some tools that you can use to perform actions.
+async function openInBrowser(filepath) {
+    const absolutePath = path.resolve(filepath);
+    const fileUrl = `file://${absolutePath}`;
 
-Tools:
-1. getTheWeatherOfCity(cityname: string): Fetches the live weather of the city.
-2. executeCommand(cmd: string): Executes a linux/unix command inside the machine of the user. Example args: "mkdir scaler_clone"
-3. createFile(args: string): Creates a file with the given content. The args MUST be a valid JSON string like: {"filepath": "index.html", "content": "<h1>Hello</h1>"}. Make sure to escape quotes properly.
-4. readFile(filepath: string): Reads the contents of a file.
+    printBoxed("OPENING IN BROWSER", ICONS.browser, COLORS.green, `Opening ${filepath} in your default browser...`);
 
-Rules:
-1. You will always follow the JSON format for your responses.
-2. You will do one step at a time and wait for the previous step to be completed via an OBSERVE message.
-3. You will always do multiple THINK steps to plan before producing any OUTPUT or TOOL step.
-4. After every TOOL step, wait for the developer to provide an OBSERVE step. Do NOT simulate the OBSERVE step yourself.
-5. If creating a website, break it down: THINK -> Create HTML -> OBSERVE -> THINK -> Create CSS -> OBSERVE -> THINK -> Create JS -> OBSERVE -> OUTPUT.
-6. The user may ask you to "clone the Scaler Academy website". If they do, use the tools to generate HTML, CSS, and JS files with a Header, Hero section, and Footer that visually resemble the Scaler website (dark blue, vibrant red/orange call to actions, modern typography).
+    // macOS uses 'open', Linux uses 'xdg-open'
+    const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+    return new Promise((res) => {
+        exec(`${cmd} "${fileUrl}"`, (error) => {
+            if (error) {
+                console.log(`  ${COLORS.red}${ICONS.error} Could not auto-open browser: ${error.message}${COLORS.reset}`);
+            }
+            res();
+        });
+    });
+}
 
-Output format:
-{ "step": "START | THINK | TOOL | OBSERVE | OUTPUT", "content": "string", "tool_name": "string", "tool_args": "string" }
+// ─────────────────────────────────────────
+//  SYSTEM PROMPT
+// ─────────────────────────────────────────
 
-Examples:
-user: Create a hello world html file
-assistant: { "step": "START", "content": "User wants me to create a hello world HTML file." }
-assistant: { "step": "THINK", "content": "I need to use the createFile tool to generate an index.html file." }
-assistant: { "step": "TOOL", "tool_name": "createFile", "tool_args": "{\\"filepath\\": \\"index.html\\", \\"content\\": \\"<h1>Hello World</h1>\\"}" }
-developer: { "step": "OBSERVE", "content": "File index.html created successfully." }
-assistant: { "step": "THINK", "content": "The file was successfully created. I can notify the user now." }
-assistant: { "step": "OUTPUT", "content": "I have created the index.html file for you." }
-`;
+const system_prompt = `You are an AI CLI agent. Follow: INPUT->THINK->TOOL->OBSERVE->OUTPUT.
 
-// ------------- MAIN AGENT LOOP -------------
+TOOLS:
+1. getTheWeatherOfCity(cityname) - weather data. Args: "Mumbai"
+2. executeCommand(cmd) - shell command. Args: "mkdir -p project"
+3. createFile(args) - create file. Args must be JSON: {"filepath":"f.html","content":"html code"}
+4. readFile(filepath) - read file. Args: "index.html"
+
+RULES:
+- Respond with ONE JSON object per message: {"step":"START|THINK|TOOL|OUTPUT","content":"...","tool_name":"...","tool_args":"..."}
+- Do 2+ THINK steps before first TOOL.
+- After TOOL, STOP and wait for OBSERVE. Never fake OBSERVE.
+- For websites: mkdir -> HTML -> CSS -> JS -> OUTPUT (one tool at a time).
+- Write FULL production code. No placeholders. HTML 100+ lines, CSS 150+ lines.
+- Use Google Fonts, modern CSS (flexbox/grid/transitions/hover/responsive).
+
+SCALER CLONE SPEC:
+Colors: bg #FFF, dark #10162A, accent #1A73E8, CTA #E94E1B, gradient text #2563EB->#06B6D4, text #1A1A2E/#6B7280
+Font: Inter from Google Fonts
+Layout: 1)Sticky nav(white,SCALER logo,PROGRAM/MASTERCLASS/AI LABS/ALUMNI/RESOURCES links,Login+PLACEMENT REPORT btns) 2)Hero(pill"THE MARKET HAS ALREADY CHANGED",heading"Become the Professional Built for the Next Decade in AI."gradient on Next/Decade/AI,subtitle,program pills,REQUEST A CALLBACK+BOOK FREE LIVE CLASS btns) 3)Why Scaler(#10162A bg,"Built Different Designed to Last",4 cards:AI-Integrated Curriculum/AI Powered Platform/Lifelong Learning Access/Strong Foundations) 4)Logo marquee(Microsoft/Amazon/OpenAI/Meta/Adobe/Google DeepMind) 5)Help bar
+Effects: nav shadow on scroll, btn hover scale, card hover lift, logo scroll animation
+EXAMPLE:
+user: Create hello world
+assistant: {"step":"START","content":"Creating hello world HTML."}
+assistant: {"step":"THINK","content":"Need a proper HTML file."}
+assistant: {"step":"THINK","content":"Will use createFile."}
+assistant: {"step":"TOOL","tool_name":"createFile","tool_args":"{\\"filepath\\":\\"index.html\\",\\"content\\":\\"<!DOCTYPE html><html><head><title>Hello</title></head><body><h1>Hello World</h1></body></html>\\"}"}
+OBSERVE: File created.
+assistant: {"step":"OUTPUT","content":"Done! index.html created."}`;
+
+// ─────────────────────────────────────────
+//  MAIN AGENT LOOP
+// ─────────────────────────────────────────
 
 async function askUser(query) {
     return new Promise(resolve => rl.question(query, resolve));
@@ -117,21 +237,32 @@ async function runAgent(userInstruction) {
         { role: "user", content: userInstruction }
     ];
 
-    console.log("\\n[Agent] Starting task...");
+    // Show user message in chat style
+    printBoxed("YOU", ICONS.user, COLORS.blue, userInstruction);
 
-    while (true) {
+    let maxIterations = 50; // Safety limit
+    let iteration = 0;
+
+    while (iteration < maxIterations) {
+        iteration++;
         try {
+            const spinner = createSpinner("AI is thinking...");
+
             const response = await client.chat.completions.create({
-                model: isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini',
+                model: isGroq ? "llama-3.3-70b-versatile" : "gpt-4o-mini",
                 messages: messages,
-                response_format: { type: "json_object" }
+                response_format: { type: "json_object" },
+                temperature: 0.7,
+                max_tokens: isGroq ? 8000 : 16000,
             });
+
+            spinner.stop("Response received");
 
             const content = response.choices[0].message.content;
             let parsedContent;
-            
+
             try {
-                // Remove markdown formatting if present
+                // Strip markdown code fences if present
                 let jsonString = content;
                 const match = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
                 if (match) {
@@ -139,82 +270,123 @@ async function runAgent(userInstruction) {
                 }
                 parsedContent = JSON.parse(jsonString);
             } catch (err) {
-                console.error("[Error] Agent returned invalid JSON. Content was:", content);
+                printBoxed("ERROR", ICONS.error, COLORS.red, `Agent returned invalid JSON:\n${content.substring(0, 200)}`);
                 break;
             }
 
             messages.push({
-                role: 'assistant',
+                role: "assistant",
                 content: JSON.stringify(parsedContent)
             });
 
+            // ── Handle each step type with pretty output ──
+
             if (parsedContent.step === "START") {
-                console.log("\\x1b[34m[START]\\x1b[0m", parsedContent.content);
-            } 
+                printBoxed("STARTING", ICONS.start, COLORS.magenta, parsedContent.content);
+            }
             else if (parsedContent.step === "THINK") {
-                console.log("\\x1b[33m[THINK]\\x1b[0m", parsedContent.content);
-            } 
+                printBoxed("THINKING", ICONS.think, COLORS.yellow, parsedContent.content);
+            }
             else if (parsedContent.step === "TOOL") {
-                console.log(`\\x1b[36m[TOOL]\\x1b[0m Calling \\x1b[32m${parsedContent.tool_name}\\x1b[0m with args: ${parsedContent.tool_args}`);
-                
-                if (!tool_map[parsedContent.tool_name]) {
-                    const errorMsg = `Tool ${parsedContent.tool_name} is not available`;
-                    console.log("\\x1b[31m[OBSERVE]\\x1b[0m", errorMsg);
+                const toolName = parsedContent.tool_name;
+                const toolArgs = parsedContent.tool_args;
+
+                // Pretty tool display
+                let toolIcon = ICONS.tool;
+                if (toolName === "createFile") toolIcon = ICONS.file;
+                if (toolName === "executeCommand") toolIcon = ICONS.folder;
+
+                const shortArgs = toolArgs && toolArgs.length > 80
+                    ? toolArgs.substring(0, 80) + "..."
+                    : toolArgs;
+                printBoxed(`TOOL: ${toolName}`, toolIcon, COLORS.cyan, `Args: ${shortArgs}`);
+
+                if (!tool_map[toolName]) {
+                    const errorMsg = `Tool "${toolName}" is not available.`;
+                    printBoxed("OBSERVE (Error)", ICONS.error, COLORS.red, errorMsg);
                     messages.push({
                         role: "developer",
-                        content: JSON.stringify({
-                            step: "OBSERVE",
-                            content: errorMsg
-                        })
+                        content: JSON.stringify({ step: "OBSERVE", content: errorMsg })
                     });
                 } else {
-                    // Execute tool
-                    const data = await tool_map[parsedContent.tool_name](parsedContent.tool_args);
-                    console.log("\\x1b[35m[OBSERVE]\\x1b[0m", data);
-                    
+                    // Execute tool with spinner
+                    const toolSpinner = createSpinner(`Executing ${toolName}...`);
+                    const data = await tool_map[toolName](toolArgs);
+                    toolSpinner.stop(`${toolName} completed`);
+
+                    // Show observe result (truncate if very long)
+                    const displayData = data.length > 300
+                        ? data.substring(0, 300) + `\n... (${data.length} chars total)`
+                        : data;
+                    printBoxed("OBSERVE", ICONS.observe, COLORS.magenta, displayData);
+
                     messages.push({
                         role: "developer",
-                        content: JSON.stringify({
-                            step: "OBSERVE",
-                            content: data
-                        })
+                        content: JSON.stringify({ step: "OBSERVE", content: data })
                     });
                 }
-            } 
-            else if (parsedContent.step === "OUTPUT") {
-                console.log("\\x1b[32m[OUTPUT]\\x1b[0m", parsedContent.content);
-                break; // End the loop
             }
-            else {
-                console.log("[UNKNOWN STEP]", parsedContent);
+            else if (parsedContent.step === "OUTPUT") {
+                printBoxed("DONE", ICONS.output, COLORS.green, parsedContent.content);
+
+                // Auto-open HTML files in browser
+                const htmlFiles = createdFiles.filter(f => f.endsWith(".html"));
+                if (htmlFiles.length > 0) {
+                    // Find the main index.html, or the first HTML file
+                    const mainFile = htmlFiles.find(f => f.includes("index.html")) || htmlFiles[0];
+                    await openInBrowser(mainFile);
+                }
+
                 break;
             }
+            else {
+                printBoxed("UNKNOWN STEP", ICONS.error, COLORS.red, JSON.stringify(parsedContent));
+                break;
+            }
+
         } catch (error) {
-            console.error("[Fatal Error] Communication with OpenAI failed:", error.message);
+            printBoxed("FATAL ERROR", ICONS.error, COLORS.red, `Communication failed: ${error.message}`);
             break;
         }
     }
+
+    if (iteration >= maxIterations) {
+        printBoxed("TIMEOUT", ICONS.error, COLORS.red, "Agent exceeded maximum iterations (50). Stopping.");
+    }
 }
 
-// ------------- ENTRY POINT -------------
+// ─────────────────────────────────────────
+//  ENTRY POINT
+// ─────────────────────────────────────────
 
 async function main() {
-    console.log("=========================================");
-    console.log("   AI Agent CLI Tool - Assignment 02     ");
-    console.log("=========================================\\n");
+    console.log();
+    console.log(`  ${COLORS.bold}${COLORS.cyan}╔══════════════════════════════════════════╗${COLORS.reset}`);
+    console.log(`  ${COLORS.bold}${COLORS.cyan}║                                          ║${COLORS.reset}`);
+    console.log(`  ${COLORS.bold}${COLORS.cyan}║     ${COLORS.white}🤖 AI Agent CLI Tool${COLORS.cyan}                 ║${COLORS.reset}`);
+    console.log(`  ${COLORS.bold}${COLORS.cyan}║     ${COLORS.dim}Assignment 02${COLORS.cyan}${COLORS.bold}                       ║${COLORS.reset}`);
+    console.log(`  ${COLORS.bold}${COLORS.cyan}║                                          ║${COLORS.reset}`);
+    console.log(`  ${COLORS.bold}${COLORS.cyan}╚══════════════════════════════════════════╝${COLORS.reset}`);
+    console.log();
 
     if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === "your-openai-api-key-here") {
-        console.error("\\x1b[31m[Error]\\x1b[0m OPENAI_API_KEY is missing or invalid in .env file.");
-        console.log("Please create a .env file based on .env.example and add your API key.");
+        printBoxed("ERROR", ICONS.error, COLORS.red, "OPENAI_API_KEY is missing or invalid in .env file. Please create a .env file and add your API key.");
         process.exit(1);
     }
 
-    const startInstruction = await askUser("How can I help you today? (e.g., 'Clone the Scaler Academy website'): ");
-    
+    const provider = isGroq ? "Groq (Llama 3.3 70B)" : "OpenAI (GPT-4o Mini)";
+    console.log(`  ${COLORS.dim}Using: ${provider}${COLORS.reset}`);
+    printSeparator();
+
+    const startInstruction = await askUser(`\n  ${ICONS.user} ${COLORS.bold}How can I help you today?${COLORS.reset}\n  ${COLORS.dim}(e.g., "Clone the Scaler Academy website")${COLORS.reset}\n\n  ${COLORS.green}▶${COLORS.reset} `);
+
     if (startInstruction.trim()) {
         await runAgent(startInstruction);
     }
 
+    console.log();
+    console.log(`  ${COLORS.dim}Thanks for using AI Agent CLI! 👋${COLORS.reset}`);
+    console.log();
     rl.close();
 }
 
