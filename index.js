@@ -137,7 +137,25 @@ async function executeCommand(cmd = "") {
 
 async function createFile(argsStr = "") {
     try {
-        const args = JSON.parse(argsStr);
+        // Sanitize: Groq/Llama often puts literal newlines/tabs inside JSON strings
+        // which causes "Bad control character" errors. Fix them before parsing.
+        let sanitized = argsStr;
+        // Replace literal control characters inside the JSON string values
+        // but preserve actual JSON structure
+        sanitized = sanitized.replace(/[\x00-\x1F\x7F]/g, (char) => {
+            switch (char) {
+                case '\n': return '\\n';
+                case '\r': return '\\r';
+                case '\t': return '\\t';
+                default: return ''; // strip other control chars
+            }
+        });
+
+        const args = JSON.parse(sanitized);
+        // Restore actual newlines in file content (convert \n back to real newlines)
+        if (args.content) {
+            args.content = args.content.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+        }
         // Ensure parent directories exist
         const dir = path.dirname(args.filepath);
         if (dir && dir !== ".") {
@@ -340,8 +358,14 @@ async function runAgent(userInstruction) {
                 break;
             }
             else {
-                printBoxed("UNKNOWN STEP", ICONS.error, COLORS.red, JSON.stringify(parsedContent));
-                break;
+                // Handle unknown steps (STOP, WAIT, etc.) gracefully — just continue the loop
+                // so the model can recover instead of crashing
+                printBoxed("CONTINUING", ICONS.think, COLORS.yellow, `Agent sent step "${parsedContent.step}". Continuing...`);
+                // Re-prompt the model to keep going
+                messages.push({
+                    role: "developer",
+                    content: JSON.stringify({ step: "OBSERVE", content: "Continue with the next step. Do not use STOP — use THINK, TOOL, or OUTPUT only." })
+                });
             }
 
         } catch (error) {
