@@ -123,14 +123,21 @@ async function runAgent(userInstruction) {
         try {
             const response = await client.chat.completions.create({
                 model: isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini',
-                messages: messages
+                messages: messages,
+                response_format: { type: "json_object" }
             });
 
             const content = response.choices[0].message.content;
             let parsedContent;
             
             try {
-                parsedContent = JSON.parse(content);
+                // Remove markdown formatting if present
+                let jsonString = content;
+                const match = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+                if (match) {
+                    jsonString = match[1];
+                }
+                parsedContent = JSON.parse(jsonString);
             } catch (err) {
                 console.error("[Error] Agent returned invalid JSON. Content was:", content);
                 break;
