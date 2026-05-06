@@ -11,8 +11,12 @@ const rl = readline.createInterface({
     output: process.stdout
 });
 
+const apiKey = process.env.OPENAI_API_KEY;
+const isGroq = apiKey && apiKey.startsWith("gsk_");
+
 const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
+    apiKey: apiKey,
+    baseURL: isGroq ? "https://api.groq.com/openai/v1" : undefined
 });
 
 // ------------- TOOLS -------------
@@ -118,7 +122,7 @@ async function runAgent(userInstruction) {
     while (true) {
         try {
             const response = await client.chat.completions.create({
-                model: 'gpt-4o-mini', // Changed from gpt-4.1-mini to a valid model
+                model: isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini',
                 messages: messages
             });
 
